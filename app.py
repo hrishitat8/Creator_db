@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import google.generativeai as genai
 
-# --- 1. CONFIG & AI SETUP ---
-st.set_page_config(page_title="CreatorOS Pro v2", layout="wide")
+# --- 1. SETTINGS & AI CONFIG ---
+st.set_page_config(page_title="CreatorOS: ROI Dashboard", layout="wide")
 
 try:
     API_KEY = st.secrets["GEMINI_KEY"]
@@ -11,94 +11,108 @@ try:
     genai.configure(api_key=API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
 except:
-    st.error("Check Streamlit Secrets for GEMINI_KEY and SHEET_URL")
+    st.error("Setup Secrets: GEMINI_KEY and SHEET_URL")
     st.stop()
 
+# Convert Google Sheet URL to direct CSV link
 CSV_URL = SHEET_URL.replace("/edit?usp=sharing", "/export?format=csv")
 
-# --- 2. DYNAMIC DATA CLEANING ---
-def clean_data(df):
-    """Automatically cleans numerical columns and handles missing text"""
-    # Clean Followers, Views, and Engagement (converts 10k to 10000, 5% to 0.05)
-    for col in ['Followers', 'Views', 'Engagement']:
-        if col in df.columns:
-            df[col] = df[col].astype(str).replace({'k': '*1e3', 'K': '*1e3', 'M': '*1e6', ',': '', '%': '/100'}, regex=True).map(pd.eval).fillna(0)
+# --- 2. ADVANCED DATA ENGINE ---
+@st.cache_data(ttl=600) # Refreshes every 10 mins
+def load_and_clean_data(url):
+    df = pd.read_csv(url)
     
-    # Fill missing text fields
-    text_cols = ['Language', 'City', 'Niche']
-    for col in text_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna("Not Specified")
+    # Clean Numeric Columns
+    def parse_num(val):
+        if pd.isna(val): return 0
+        val = str(val).lower().replace('$', '').replace(',', '').replace('%', '')
+        if 'k' in val: return float(val.replace('k', '')) * 1000
+        if 'm' in val: return float(val.replace('m', '')) * 1000000
+        try: return float(val)
+        except: return 0
+
+    df['Followers'] = df['Followers'].apply(parse_num)
+    df['Engagement_Rate_%'] = df['Engagement_Rate_%'].apply(parse_num)
+    df['Avg_Views'] = df['Avg_Views'].apply(parse_num)
+    df['Cost_Per_Post'] = df['Cost_Per_Post'].apply(parse_num)
+    
+    # AI Feature: Calculate Value Score (Views per Dollar)
+    df['Value_Score'] = df.apply(lambda x: x['Avg_Views'] / x['Cost_Per_Post'] if x['Cost_Per_Post'] > 0 else 0, axis=1)
+    
     return df
 
-# --- 3. DASHBOARD UI ---
+# --- 3. SIDEBAR: CAMPAIGN FLOW ---
+st.sidebar.header("📁 Campaign Management")
+mode = st.sidebar.radio("Flow", ["New Campaign", "Select Existing"])
+
+if mode == "New Campaign":
+    with st.sidebar.form("campaign_form"):
+        c_code = st.text_input("Campaign Code (Mandatory)*")
+        c_name = st.text_input("Campaign Name (Mandatory)*")
+        # Combine niches for selection
+        available_niches = ["Tech", "Fitness", "Fashion", "Travel", "Lifestyle", "Gaming", "Food"]
+        c_niches = st.multiselect("Target Niches*", available_niches)
+        submit = st.form_submit_button("Create")
+        if submit and c_code and c_name:
+            st.session_state['active_camp'] = {"code": c_code, "name": c_name, "niches": c_niches}
+else:
+    # Simulated existing campaigns
+    st.session_state['active_camp'] = {"code": "SUMMER24", "name": "Summer Launch", "niches": ["Travel", "Lifestyle"]}
+
+# --- 4. MAIN DASHBOARD ---
 st.title("🚀 Creator Dashboard")
 
-# Sidebar: Campaign Setup (Requirement #1 & #2)
-st.sidebar.header("Campaign Manager")
-with st.sidebar.expander("📝 Setup New Campaign", expanded=True):
-    c_code = st.text_input("Campaign Code*")
-    c_name = st.text_input("Campaign Name*")
-    # Dynamic Niche Selection
-    target_niches = st.multiselect("Target Niches", ["Tech", "Fitness", "Lifestyle", "Fashion", "Travel"])
+try:
+    df = load_and_clean_data(CSV_URL)
+    
+    if 'active_camp' in st.session_state:
+        camp = st.session_state['active_camp']
+        st.subheader(f"Vetting for: {camp['name']} ({camp['code']})")
+        
+        # Filtering logic: Checks BOTH Primary and Secondary Niches
+        if camp['niches']:
+            mask = df['Primary_Niche'].isin(camp['niches']) | df['Secondary_Niche'].isin(camp['niches'])
+            filtered_df = df[mask]
+        else:
+            filtered_df = df
 
-# Sidebar: Global Filters (Requirement #3)
-st.sidebar.header("Global Filters")
-raw_df = pd.read_csv(CSV_URL)
-df = clean_data(raw_df)
+        # AI Recommendations Top Bar
+        top_val = filtered_df.sort_values('Value_Score', ascending=False).head(1)
+        if not top_val.empty:
+            st.info(f"💡 AI Suggestion: **{top_val.iloc[0]['Name']}** offers the best 'Views-per-Dollar' in this niche.")
 
-selected_lang = st.sidebar.multiselect("Filter by Language", options=df['Language'].unique())
-selected_city = st.sidebar.multiselect("Filter by City", options=df['City'].unique())
-
-# --- 4. DATA PROCESSING & AI RANKING ---
-# Filter data based on user selection
-filtered_df = df.copy()
-
-if target_niches:
-    filtered_df = filtered_df[filtered_df['Niche'].str.contains('|'.join(target_niches), case=False)]
-if selected_lang:
-    filtered_df = filtered_df[filtered_df['Language'].isin(selected_lang)]
-if selected_city:
-    filtered_df = filtered_df[filtered_df['City'].isin(selected_city)]
-
-# AI Feature: Detect Incomplete Profiles
-filtered_df['Health_Check'] = filtered_df.apply(lambda x: "⚠️ Incomplete" if "Not Specified" in x.values else "✅ Healthy", axis=1)
-
-# --- 5. MAIN DISPLAY ---
-if c_code:
-    st.subheader(f"Vetting: {c_name} [{c_code}]")
-    st.write(f"Showing {len(filtered_df)} relevant creators")
-
-    for _, row in filtered_df.iterrows():
-        with st.container(border=True):
-            # Layout for many fields
-            header_col, stats_col, action_col = st.columns([2, 3, 1])
-            
-            with header_col:
-                st.markdown(f"### {row['Handle']}")
-                st.caption(f"📍 {row['City']} | 🌐 {row['Language']}")
-                st.write(f"**Niche:** {row['Niche']}")
-                if row['Health_Check'] == "⚠️ Incomplete":
-                    st.warning("Profile needs more data")
-
-            with stats_col:
-                # Use columns inside columns for stats
-                s1, s2, s3 = st.columns(3)
-                s1.metric("Followers", f"{int(row['Followers']):,}")
-                s2.metric("Avg Views", f"{int(row['Views']):,}")
-                s3.metric("Engagement", f"{row['Engagement']:.1%}")
+        # --- CREATOR GRID ---
+        for _, row in filtered_df.iterrows():
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([2, 3, 1])
                 
-            with action_col:
-                # Requirement #4: Classification
-                status = st.selectbox("Action", ["Review", "Shortlisted", "Backup", "Rejected"], key=f"status_{row['Handle']}")
-                if st.button("Confirm", key=f"btn_{row['Handle']}"):
-                    st.success("Logged!")
+                with col1:
+                    st.markdown(f"### {row['Name']}")
+                    st.caption(f"🆔 ID: {row['Creator_ID']} | 📍 {row['City']}")
+                    st.write(f"**Niches:** {row['Primary_Niche']} / {row['Secondary_Niche']}")
+                    st.write(f"**Platform:** {row['Platform']}")
 
-else:
-    st.info("👈 Enter a Campaign Code in the sidebar to begin.")
+                with col2:
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Followers", f"{int(row['Followers']):,}")
+                    m2.metric("Engagement", f"{row['Engagement_Rate_%']}%")
+                    m3.metric("Avg Views", f"{int(row['Avg_Views']):,}")
+                    
+                    # Cost Highlight
+                    st.markdown(f"💰 **Cost per Post:** ${row['Cost_Per_Post']:,.2f}")
+                    # Email/Contact Expander (Saves space)
+                    with st.expander("📞 View Contact Details"):
+                        st.write(f"📧 {row['Contact_Email']}")
+                        st.write(f"📱 {row['Contact_Number']}")
 
-# AI Requirement Example: Auto-Recommendation
-if st.checkbox("AI: Recommend Top 3 Creators"):
-    st.write("Based on Engagement vs Views ratio, we recommend:")
-    top_3 = filtered_df.sort_values(by='Engagement', ascending=False).head(3)
-    st.table(top_3[['Handle', 'Engagement', 'Views']])
+                with col3:
+                    # Requirement: Classification
+                    status = st.selectbox("Classification", ["Review", "Shortlisted", "Backup", "Rejected"], key=f"stat_{row['Creator_ID']}")
+                    if st.button("Save", key=f"save_{row['Creator_ID']}"):
+                        st.success("Updated")
+
+    else:
+        st.warning("Please set up a Campaign in the sidebar to view relevant creators.")
+
+except Exception as e:
+    st.error(f"Error: Ensure your Google Sheet is shared 'Anyone with the Link'. Details: {e}")
