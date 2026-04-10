@@ -56,7 +56,7 @@ if 'classifications' not in st.session_state:
     st.session_state.classifications = {} # Stores Creator: Status
 
 # --- 3. UI: CAMPAIGN HUB (TOP SECTION) ---
-st.title("🚀 CreatorOS Intelligence")
+st.title("🚀 Creator Dashboard")
 
 tab_new, tab_existing = st.tabs(["➕ Create New Campaign", "📂 Select Existing Campaign"])
 
